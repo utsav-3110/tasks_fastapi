@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from  . import task
 from . import user
+from . import admin
 
 prefix = '/api/v1'
 
@@ -10,5 +11,7 @@ router = APIRouter(
 
 
 
-router.include_router(task.router)
+
+router.include_router(admin.router)
 router.include_router(user.router)
+router.include_router(task.router)
