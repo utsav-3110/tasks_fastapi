@@ -5,11 +5,11 @@ from database import Base
 class Users(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True , index=True, autoincrement=True)
-    username = Column(String , nullable=False , unique=True)
-    email = Column(String , nullable=False , unique=True)
-    avatar_url = Column(String)
-    full_name = Column(String)
-    password = Column(String)
+    username = Column(String(20) , nullable=False )
+    email = Column(String(50) , nullable=False , unique=True)
+    avatar_url = Column(String(250))
+    full_name = Column(String(50))
+    password = Column(String(100))
     is_deleted = Column(Boolean ,  default=False)
-    login_attempt = Column(Integer , default=0)
+    is_admin = Column(Boolean , default=False)
 

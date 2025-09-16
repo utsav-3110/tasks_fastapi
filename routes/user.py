@@ -1,7 +1,7 @@
 import datetime
 from datetime import timedelta
 from typing import Annotated
-from fastapi import APIRouter, Depends, UploadFile, Form, File, HTTPException, status
+from fastapi import APIRouter, Depends, UploadFile, Form, File, HTTPException, status, Header, Body
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi_limiter.depends import RateLimiter
 from pydantic import EmailStr
@@ -14,6 +14,8 @@ from tables.users import Users
 from utils.cloudinary_upload import create_upload_file
 from passlib.context import CryptContext
 from database import get_db
+from utils.api_response import api_response
+
 from jose import jwt, JWTError
 from dotenv import load_dotenv
 import os
@@ -33,33 +35,34 @@ bcrypt_context = CryptContext(schemes=['bcrypt'])
 db_dependency = Annotated[Session, Depends(get_db)]
 
 
-async def create_access_token(username: str, id: int, expires_update: timedelta):
-    user = {"username": username, "user_id": id}
+async def create_access_token(email: EmailStr,  expires_update: timedelta):
+    user = {"email": email}
     expires = datetime.datetime.now(datetime.timezone.utc) + expires_update
     user.update({'exp': expires})
     return jwt.encode(user, SECRET_KEY, algorithm=ALGO)
 
 
-async def get_current_user(token: Annotated[str, Depends(oauthbearer)]):
+async def get_current_user(  db : db_dependency,Authorization: str = Header(...) ):
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGO])
-        username = payload.get('username')
-        user_id = payload.get('user_id')
+        payload = jwt.decode(Authorization, SECRET_KEY, algorithms=[ALGO])
+        email = payload.get('email')
 
-        if user_id is None or username is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='INVALID TOKEN')
+        if email is None:
+            return api_response(False , 401 , 'invalid token')
+        print(email)
+        user = get_user_by_email(email , db)
 
-        return {'username': username, 'user_id': user_id}
+        return {'email': email, 'user_id': user.id}
     except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='INVALID TOKEN')
+        return api_response(False, 401, 'jwt token')
 
 
 user_dependency = Annotated[dict, Depends(get_current_user)]
 
 
-async def verify_password(username: str, password: str, db):
-    user = db.query(Users).filter(Users.username == username).first()
-
+async def verify_password(email: EmailStr, password: str, db):
+    user = get_user_by_email(email , db)
+    print("-============================================================================================================/n",user)
     if not user:
         return False
 
@@ -69,8 +72,14 @@ async def verify_password(username: str, password: str, db):
     return False
 
 
+def get_user_by_email(email : EmailStr , db):
+    return db.query(Users).filter(Users.email == email).first()
+
+def get_user_by_id(id : str , db):
+    return db.query(Users.id == id).first()
+
 @router.post('/sign-up')
-async def sing_up(
+async def sign_up(
         db: db_dependency,
         username: str = Form(...),
         email: EmailStr = Form(...),
@@ -78,88 +87,100 @@ async def sing_up(
         full_name: str = Form(...),
         file: UploadFile = File(...)
 ):
-    UserRequest(username=username, email=email, password=password, full_name=full_name)
+    try :
+        UserRequest(username=username, email=email, password=password, full_name=full_name)
 
-    url = await create_upload_file(file)
+        url = await create_upload_file(file)
 
-    user = Users(
-        username=username,
-        email=email,
-        password=bcrypt_context.hash(password),
-        full_name=full_name,
-        avatar_url=url
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+        user  = get_user_by_email(email, db)
 
-    return user
+        if user :
+            return api_response(False, 409, {'error': 'Email already exists try to login '})
+
+        user = Users(
+            username=username,
+            email=email,
+            password=bcrypt_context.hash(password),
+            full_name=full_name,
+            avatar_url=url
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        return api_response(True, 200, {'user': user})
+
+    except Exception as e:
+        db.rollback()
+        return api_response(False, 404, {'error': str(e.orig.args[1])})
 
 
-@router.post('/login', response_model=Token , dependencies=[Depends(RateLimiter(times=5, seconds=60))])
-async def login(db: db_dependency, form_data: OAuth2PasswordRequestForm = Depends()):
-    username = form_data.username
-    password = form_data.password
+@router.post('/login')
+async def login(db: db_dependency, email: EmailStr = Form(...),
+        password: str = Form(...)):
 
-    user = await verify_password(username, password, db)
+    print(email)
+    print(password)
+
+    user = await verify_password(email, password, db)
 
     if not user:
-        raise HTTPException(status_code=401, detail='Not authorization')
+        return api_response(False , 401 , 'Not authrized ')
 
     if user.is_deleted:
-        raise HTTPException(status_code=404, detail='Account not found')
+        return api_response(False , 404 , 'account not found ')
 
-    access_token = await create_access_token(user.username, user.id, timedelta(minutes=60))
+    access_token = await create_access_token(user.username, timedelta(minutes=60))
 
-    return {'access_token': access_token, 'token_type': 'bearer'}
+    return api_response(True , 200 , {'access_token': access_token, 'token_type': 'bearer'})
 
+from fastapi import UploadFile, File
 
 @router.patch('/update')
-async def update(data: PatchUserModel, db: db_dependency, user: user_dependency):
+async def update(
+    db: db_dependency,
+    user: user_dependency,
+    file: UploadFile = File(None)  ,
+        email: EmailStr = Form(None),
+        full_name: str = Form(None),
+        password: str = Form(None)
+):
     if not user:
-        raise HTTPException(status_code=401, detail='Not authorized')
+        return api_response(False, 404, 'account not found')
 
-    user_db = db.query(Users).filter(Users.id == user.get('user_id')).first()
+    user_db = get_user_by_id(user.get('user_id'), db)
+
+    print('================================================================================')
+    print('================================================================================')
+
+    print('================================================================================')
+    print(user)
+    print('================================================================================')
+    print('================================================================================')
+    print('================================================================================')
+
+
 
     if not user_db:
-        raise HTTPException(status_code=404, detail='User not found')
+        return api_response(False, 404, 'account not found')
 
     if user_db.is_deleted:
-        raise HTTPException(status_code=404, detail='Account not found')
+        return api_response(False, 404, 'account not found')
 
-    if data.email is not None:
-        user_db.email = data.email
-    if data.full_name is not None:
-        user_db.full_name = data.full_name
-    if data.password is not None:
-        user_db.password = bcrypt_context.hash(data.password)
+    # Update basic user info if provided
+    if email is not None:
+        user_db.email = email
+    if full_name is not None:
+        user_db.full_name = full_name
+    if password is not None:
+        user_db.password = bcrypt_context.hash(password)
 
-    db.commit()
-
-    db.refresh(user_db)
-
-    return user_db
-
-
-@router.post('/change-avatar')
-async def update_avatar(db: db_dependency, user: user_dependency, file: UploadFile = File(...)):
-    if not user:
-        raise HTTPException(status_code=401, detail='Not authorized')
-
-    user_db = db.query(Users).filter(Users.id == user.get('user_id')).first()
-
-    if not user_db:
-        raise HTTPException(status_code=404, detail='User not found')
-
-    if user_db.is_deleted:
-        raise HTTPException(status_code=404, detail='Account not found')
-
-    url = await create_upload_file(file)
-
-    user_db.avatar_url = url
+    # Update avatar if file is provided
+    if file:
+        url = await create_upload_file(file)
+        user_db.avatar_url = url
 
     db.commit()
-
     db.refresh(user_db)
 
     return user_db
@@ -168,12 +189,12 @@ async def update_avatar(db: db_dependency, user: user_dependency, file: UploadFi
 @router.delete('/soft-delete')
 async def soft_delete(db: db_dependency, user: user_dependency):
     if not user:
-        raise HTTPException(status_code=401, detail='Not authorized')
+        return api_response(False, 404, 'account not found ')
 
-    user_db = db.query(Users).filter(Users.id == user.get('user_id')).first()
+    user_db = get_user_by_id(user.get('user_id'), db)
 
     if not user_db:
-        raise HTTPException(status_code=404, detail='User not found')
+        return api_response(False , 404 , 'account not found ')
 
     if user_db.is_deleted:
         raise HTTPException(status_code=404, detail='Account not found')
@@ -188,12 +209,12 @@ async def soft_delete(db: db_dependency, user: user_dependency):
 @router.delete('/hard-delete')
 async def hard_delete(db: db_dependency, user: user_dependency):
     if not user:
-        raise HTTPException(status_code=401, detail='Not authorized')
+        raise HTTPException(status_code=404, detail='Account not found')
 
-    user_db = db.query(Users).filter(Users.id == user.get('user_id')).first()
+    user_db = get_user_by_id(user.get('user_id'), db)
 
     if not user_db:
-        raise HTTPException(status_code=404, detail='User not found')
+        raise HTTPException(status_code=404, detail='Account not found')
 
     if user_db.is_deleted:
         raise HTTPException(status_code=404, detail='Account not found')
