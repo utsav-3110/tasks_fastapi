@@ -1,31 +1,26 @@
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from starlette.requests import Request
 import httpx
 from database import  engine , Base
-from fastapi_limiter import FastAPILimiter
-from fastapi_limiter.depends import RateLimiter
-import redis.asyncio as redis
+
 
 from  routes import main
 
 
 Base.metadata.create_all(bind=engine)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    r = redis.from_url("redis://localhost", encoding="utf-8", decode_responses=True)
-    await FastAPILimiter.init(r)
-    yield
-    await r.close()
-
-app = FastAPI(lifespan=lifespan)
+#
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     r = redis.from_url("redis://localhost", encoding="utf-8", decode_responses=True)
+#     await FastAPILimiter.init(r)
+#     yield
+#     await r.close()
+# lifespan=lifespan
+app = FastAPI()
 
 @app.middleware("http")
 async def ip_logger(request: Request, call_next):
-    ip =  request.client.host
-
+    ip = request.headers.get("x-forwarded-for").split(",")[0].strip()
 
 
     if ip == "127.0.0.1":
